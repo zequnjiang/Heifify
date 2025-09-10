@@ -1,5 +1,6 @@
 import SwiftUI
 import Photos
+import MapKit
 
 struct PhotoDetailView: View {
     let asset: PHAsset
@@ -116,12 +117,41 @@ struct PhotoDetailView: View {
 
     private var exifSheet: some View {
         NavigationStack {
-            List(vm.exif.keys.sorted(), id: \.self) { key in
-                HStack { Text(key); Spacer(); Text(vm.exif[key] ?? "").foregroundStyle(.secondary) }
+            List {
+                if let loc = vm.location {
+                    let region = MKCoordinateRegion(
+                        center: loc.coordinate,
+                        span: MKCoordinateSpan(latitudeDelta: 0.01, longitudeDelta: 0.01)
+                    )
+                    Map(coordinateRegion: .constant(region))
+                        .frame(height: 200)
+                        .listRowInsets(EdgeInsets())
+                    infoRow("纬度", String(format: "%.5f", loc.coordinate.latitude))
+                    infoRow("经度", String(format: "%.5f", loc.coordinate.longitude))
+                }
+                Section("拍摄设备") {
+                    if let cam = vm.cameraDescription { infoRow("相机", cam) }
+                    if let lens = vm.lensDescription { infoRow("镜头", lens) }
+                }
+                Section("拍摄参数") {
+                    if let focal = vm.focalLengthDescription { infoRow("焦距", focal) }
+                    if let aperture = vm.apertureDescription { infoRow("光圈", aperture) }
+                    if let shutter = vm.shutterDescription { infoRow("快门", shutter) }
+                    if let iso = vm.isoDescription { infoRow("ISO", iso) }
+                }
+                Section("全部 EXIF") {
+                    ForEach(vm.exif.keys.sorted(), id: \.self) { key in
+                        infoRow(key, vm.exif[key] ?? "")
+                    }
+                }
             }
-            .navigationTitle("EXIF")
+            .navigationTitle("信息")
         }
         .presentationDetents([.medium, .large])
+    }
+
+    private func infoRow(_ title: String, _ value: String) -> some View {
+        HStack { Text(title); Spacer(); Text(value).foregroundStyle(.secondary) }
     }
 
     private var convertSheet: some View {

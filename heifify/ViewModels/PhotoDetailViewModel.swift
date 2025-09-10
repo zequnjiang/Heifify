@@ -1,6 +1,7 @@
 import SwiftUI
 import Photos
 import ImageIO
+import CoreLocation
 
 enum ImageBitDepth: String, CaseIterable, Identifiable { case eightBit, tenBit; var id: String { rawValue } }
 
@@ -15,6 +16,7 @@ final class PhotoDetailViewModel: ObservableObject {
     @Published var originalSizeText: String = "—"
     @Published var estimatedSizeText: String?
     @Published var isConverting: Bool = false
+    @Published var location: CLLocation?
 
     private var imageData: Data?
     private var estimateTask: Task<Void, Never>?
@@ -23,8 +25,51 @@ final class PhotoDetailViewModel: ObservableObject {
     enum SaveMode { case addNew, overwrite }
     @Published var saveMode: SaveMode = .addNew
 
+    // MARK: - Formatted EXIF helpers
+    var cameraDescription: String? {
+        let make = exif["TIFF_Make"]
+        let model = exif["TIFF_Model"]
+        if let make, let model { return "\(make) \(model)" }
+        return make ?? model
+    }
+
+    var lensDescription: String? { exif["LensModel"] }
+
+    var focalLengthDescription: String? {
+        if let str = exif["FocalLenIn35mmFilm"], let num = Double(str) {
+            return String(format: "%.0f mm", num)
+        }
+        if let str = exif["FocalLength"], let num = Double(str) {
+            return String(format: "%.0f mm", num)
+        }
+        return nil
+    }
+
+    var apertureDescription: String? {
+        if let str = exif["FNumber"], let num = Double(str) {
+            return String(format: "f/%.1f", num)
+        }
+        return nil
+    }
+
+    var shutterDescription: String? {
+        if let str = exif["ExposureTime"], let num = Double(str) {
+            if num >= 1 { return String(format: "%.0f s", num) }
+            else { return "1/\(Int(round(1/num))) s" }
+        }
+        return nil
+    }
+
+    var isoDescription: String? {
+        if let str = exif["ISOSpeedRatings"], let num = Double(str) {
+            return "ISO \(Int(num))"
+        }
+        return nil
+    }
+
     func load(asset: PHAsset) async {
         self.currentAsset = asset
+        self.location = asset.location
         let opts = PHImageRequestOptions()
         opts.isSynchronous = false
         opts.isNetworkAccessAllowed = true
