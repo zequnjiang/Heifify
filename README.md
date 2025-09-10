@@ -6,10 +6,10 @@ Language: Swift (SwiftUI)
 Minimum iOS: 18.0
 
 Features
-- Photo grid (3 columns) from Recents album
-- Each photo shows its format (HEIF/JPG/PNG/RAW) and file size
-- Detail view shows preview and EXIF metadata
-- Convert to HEIF with adjustable quality and 8/10-bit hint, save to Photos
+ - Photo grid (3 columns) from Recents album
+ - Each photo shows its format (HEIF/JPG/PNG/RAW) and file size
+ - Detail view shows preview and EXIF metadata with iOS-style parameters and location map
+ - Convert to HEIF with adjustable quality and 8/10-bit hint, save to Photos
 
 Permissions
 - NSPhotoLibraryUsageDescription: Heifify needs access to browse and convert photos
