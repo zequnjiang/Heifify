@@ -8,7 +8,10 @@ enum ImageBitDepth: String, CaseIterable, Identifiable { case eightBit, tenBit; 
 @MainActor
 final class PhotoDetailViewModel: ObservableObject {
     @Published var previewImage: UIImage?
+    // Raw dictionaries
     @Published var exif: [String: String] = [:]
+    @Published var tiff: [String: String] = [:]
+    @Published var general: [String: String] = [:]
     @Published var quality: Double = 0.8
     @Published var depth: ImageBitDepth = .eightBit
     @Published var convertedSizeText: String?
@@ -17,6 +20,7 @@ final class PhotoDetailViewModel: ObservableObject {
     @Published var estimatedSizeText: String?
     @Published var isConverting: Bool = false
     @Published var location: CLLocation?
+    @Published var toastMessage: String?
 
     private var imageData: Data?
     private var estimateTask: Task<Void, Never>?
@@ -80,7 +84,10 @@ final class PhotoDetailViewModel: ObservableObject {
                 self.imageData = data
                 if let data, let img = UIImage(data: data) { self.previewImage = img }
                 if let data {
-                    self.exif = Self.extractEXIF(from: data)
+                    let meta = Self.extractMetadata(from: data)
+                    self.exif = meta.exif
+                    self.tiff = meta.tiff
+                    self.general = meta.general
                     self.originalSizeText = Int64(data.count).humanReadableSize
                     self.updateEstimate()
                 }
@@ -140,6 +147,82 @@ final class PhotoDetailViewModel: ObservableObject {
         }
     }
 
+    // Finder/Preview-like: quality 0.8, keep metadata/profile/bit depth, keep original pixels
+    func convertLikeFinderAndSave(completion: @escaping (Bool) -> Void) {
+        // Ensure authorization
+        let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+        if status != .authorized && status != .limited {
+            PHPhotoLibrary.requestAuthorization(for: .readWrite) { [weak self] s in
+                DispatchQueue.main.async {
+                    if s != .authorized && s != .limited {
+                        self?.toastMessage = "没有照片写入权限"
+                        completion(false)
+                    } else {
+                        self?.convertLikeFinderAndSave(completion: completion)
+                    }
+                }
+            }
+            return
+        }
+
+        guard let asset = currentAsset else { self.toastMessage = "无效的照片"; completion(false); return }
+        guard asset.canPerform(.content) else { self.toastMessage = "此照片不可编辑"; completion(false); return }
+
+        isConverting = true
+        let requestOptions = PHContentEditingInputRequestOptions(); requestOptions.isNetworkAccessAllowed = true
+        asset.requestContentEditingInput(with: requestOptions) { input, _ in
+            guard let input, let inURL = input.fullSizeImageURL else {
+                DispatchQueue.main.async { self.isConverting = false; self.errorMessage = "无法获取原图文件"; self.toastMessage = self.errorMessage; completion(false) }
+                return
+            }
+            let tmpURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).appendingPathExtension("heic")
+            do {
+                let bytes = try HEIFConverter.convertLikeFinder(inputURL: inURL, outputURL: tmpURL, quality: 0.8)
+                DispatchQueue.main.async { self.convertedSizeText = Int64(bytes).humanReadableSize }
+            } catch {
+                DispatchQueue.main.async { self.isConverting = false; self.errorMessage = "转换失败：\(error.localizedDescription)"; self.toastMessage = self.errorMessage; completion(false) }
+                return
+            }
+
+            switch self.saveMode {
+            case .addNew:
+                PHPhotoLibrary.shared().performChanges({
+                    PHAssetCreationRequest.creationRequestForAssetFromImage(atFileURL: tmpURL)
+                }) { success, err in
+                    DispatchQueue.main.async {
+                        self.isConverting = false
+                        if let err { self.errorMessage = err.localizedDescription; self.toastMessage = self.errorMessage; completion(false) }
+                        else { self.errorMessage = nil; completion(success) }
+                        try? FileManager.default.removeItem(at: tmpURL)
+                    }
+                }
+            case .overwrite:
+                let output = PHContentEditingOutput(contentEditingInput: input)
+                do {
+                    try FileManager.default.removeItem(at: output.renderedContentURL)
+                } catch { }
+                do { try FileManager.default.copyItem(at: tmpURL, to: output.renderedContentURL) } catch {
+                    DispatchQueue.main.async { self.isConverting = false; self.errorMessage = error.localizedDescription; self.toastMessage = self.errorMessage; completion(false) }
+                    return
+                }
+                output.adjustmentData = PHAdjustmentData(formatIdentifier: "com.zanejiang.heifify", formatVersion: "1.0", data: Data("heifify".utf8))
+                PHPhotoLibrary.shared().performChanges({
+                    let req = PHAssetChangeRequest(for: asset)
+                    req.contentEditingOutput = output
+                    // Keep timeline consistent: ensure creationDate unchanged
+                    if let c = asset.creationDate { req.creationDate = c }
+                }) { success, err in
+                    DispatchQueue.main.async {
+                        self.isConverting = false
+                        if let err { self.errorMessage = err.localizedDescription; self.toastMessage = self.errorMessage; completion(false) }
+                        else { self.errorMessage = nil; completion(success) }
+                        try? FileManager.default.removeItem(at: tmpURL)
+                    }
+                }
+            }
+        }
+    }
+
     func updateEstimate() {
         estimateTask?.cancel()
         guard let data = imageData else { estimatedSizeText = nil; return }
@@ -157,19 +240,95 @@ final class PhotoDetailViewModel: ObservableObject {
         }
     }
 
-    static func extractEXIF(from data: Data) -> [String: String] {
+    struct Metadata { let general: [String:String]; let exif: [String:String]; let tiff: [String:String] }
+
+    static func extractMetadata(from data: Data) -> Metadata {
         guard let src = CGImageSourceCreateWithData(data as CFData, nil),
-              let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any] else { return [:] }
-        var dict: [String: String] = [:]
-        if let exif = props[kCGImagePropertyExifDictionary] as? [CFString: Any] {
-            for (k,v) in exif { dict[String(k)] = String(describing: v) }
+              let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any] else {
+            return Metadata(general: [:], exif: [:], tiff: [:])
         }
-        if let tiff = props[kCGImagePropertyTIFFDictionary] as? [CFString: Any] {
-            for (k,v) in tiff { dict["TIFF_\(k)"] = String(describing: v) }
+        var general: [String:String] = [:]
+        var exif: [String:String] = [:]
+        var tiff: [String:String] = [:]
+
+        // General/common
+        let map: [(CFString,String)] = [
+            (kCGImagePropertyColorModel, "颜色模式"),
+            (kCGImagePropertyDepth, "深度"),
+            (kCGImagePropertyDPIHeight, "DPI高度"),
+            (kCGImagePropertyDPIWidth, "DPI宽度"),
+            (kCGImagePropertyOrientation, "方向"),
+            (kCGImagePropertyPixelHeight, "像素高度"),
+            (kCGImagePropertyPixelWidth, "像素宽度"),
+            (kCGImagePropertyProfileName, "描述文件名称")
+        ]
+        for (key,label) in map {
+            if let v = props[key] { general[label] = String(describing: v) }
         }
-        if let gps = props[kCGImagePropertyGPSDictionary] as? [CFString: Any] {
-            for (k,v) in gps { dict["GPS_\(k)"] = String(describing: v) }
+        // Try to read optional headroom if present under Apple dictionary
+        if let apple = props[kCGImagePropertyMakerAppleDictionary] as? [CFString:Any], let headroom = apple["Headroom" as CFString] {
+            general["Headroom"] = String(describing: headroom)
         }
-        return dict
+
+        // EXIF
+        if let exifDict = props[kCGImagePropertyExifDictionary] as? [CFString: Any] {
+            for (k,v) in exifDict { exif[String(k)] = String(describing: v) }
+        }
+        // TIFF
+        if let tiffDict = props[kCGImagePropertyTIFFDictionary] as? [CFString: Any] {
+            for (k,v) in tiffDict { tiff[String(k)] = String(describing: v) }
+        }
+        return Metadata(general: general, exif: exif, tiff: tiff)
     }
+
+    // Chinese labels for EXIF/TIFF common keys
+    static let exifKeyMap: [String:String] = [
+        "FNumber":"光圈值",
+        "BrightnessValue":"亮度值",
+        "ColorSpace":"色彩空间",
+        "CompositeImage":"CompositeImage",
+        "DateTimeDigitized":"数字化日期时间",
+        "DateTimeOriginal":"原始日期时间",
+        "ExifVersion":"Exif 版本",
+        "ExposureBiasValue":"曝光偏移值",
+        "ExposureMode":"曝光模式",
+        "ExposureProgram":"曝光程序",
+        "ExposureTime":"曝光时间",
+        "Flash":"闪光灯",
+        "ApertureValue":"光圈系数",
+        "FocalLength":"焦距",
+        "FocalLenIn35mmFilm":"按35毫米胶卷计算的焦距",
+        "ISOSpeedRatings":"照相感光度(ISO)",
+        "PhotographicSensitivity":"照相感光度(ISO)",
+        "LensMake":"镜头品牌",
+        "LensModel":"镜头型号",
+        "LensSpecification":"镜头规格",
+        "MeteringMode":"测光模式",
+        "OffsetTime":"修改日期的时区",
+        "OffsetTimeDigitized":"数字化日期的时区",
+        "OffsetTimeOriginal":"原始日期的时区",
+        "PixelXDimension":"横向像素数",
+        "PixelYDimension":"纵向像素数",
+        "SceneType":"场景类型",
+        "SensingMethod":"感知方法",
+        "ShutterSpeedValue":"快门速度值",
+        "SubjectArea":"主题区域",
+        "SubsecTimeDigitized":"数字化次秒级时间",
+        "SubsecTimeOriginal":"原始次秒级时间",
+        "WhiteBalance":"白平衡"
+    ]
+
+    static let tiffKeyMap: [String:String] = [
+        "DateTime":"日期时间",
+        "HostComputer":"主机",
+        "Make":"品牌",
+        "Model":"型号",
+        "Orientation":"方向",
+        "ResolutionUnit":"分辨率单位",
+        "Software":"软件",
+        "TileLength":"拼贴长度",
+        "TileWidth":"拼贴宽度",
+        "XResolution":"X分辨率",
+        "YResolution":"Y分辨率"
+    ]
 }

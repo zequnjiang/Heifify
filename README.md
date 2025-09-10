@@ -22,3 +22,9 @@ Notes
 Run
 - Open `heifify.xcodeproj` in Xcode 16+, select an iOS 18+ device/simulator, build and run.
 
+App Icon
+- Design: `Design/Heifify_Icon.svg` (淡蓝主题). Import into Sketch → export 1024×1024 PNG to `Design/AppIcon1024.png`.
+- Generate full icon set into the asset catalog:
+  - `swift Scripts/generate_appicon.swift Design/AppIcon1024.png`
+  - Output: `heifify/Assets.xcassets/AppIcon.appiconset` (PNG files + Contents.json)
+  - If Xcode is open, re-open the project or the Assets catalog to refresh.

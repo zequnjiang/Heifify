@@ -17,9 +17,13 @@ struct ContentView: View {
     @State private var showBatchConvertSheet = false
     @State private var batchQuality: Double = 0.8
     @State private var batchDepth: ImageBitDepth = .eightBit
+    @State private var batchSaveMode: PhotoDetailViewModel.SaveMode = .addNew
     @State private var overlayAsset: PHAsset? = nil
     @Namespace private var heroNS
     @Environment(\.scenePhase) private var scenePhase
+    @State private var scrollProgress: CGFloat = 0
+    @State private var scrollToTopToken: Int = 0
+    @State private var showSettings: Bool = false
 
     var body: some View {
         ZStack {
@@ -30,7 +34,10 @@ struct ContentView: View {
                     case .authorized, .limited:
                         GeometryReader { geo in
                             let cellSize = (geo.size.width - spacing*2) / 3
+                            ScrollViewReader { proxy in
                             ScrollView {
+                                // Sentinel for scrollToTop
+                                Color.clear.frame(height: 0).id("GridTop")
                                 LazyVGrid(columns: columns, spacing: spacing) {
                                     ForEach(vm.items, id: \.id) { item in
                                         GridItemView(
@@ -50,7 +57,18 @@ struct ContentView: View {
                                 }
                                 .padding(.horizontal, 0)
                             }
+                            .background(ScrollViewOffsetReader { y in
+                                let p = max(0, min(1, y / 60))
+                                if abs(p - scrollProgress) > 0.01 {
+                                    withAnimation(.easeInOut(duration: 0.15)) { scrollProgress = p }
+                                }
+                            })
                             .allowsHitTesting(overlayAsset == nil)
+                            .onChange(of: scrollToTopToken) { _ in
+                                withAnimation(.easeInOut) { proxy.scrollTo("GridTop", anchor: .top) }
+                            }
+                            }
+                            .ignoresSafeArea(edges: .top)
                         }
                     case .notDetermined:
                         VStack(spacing: 12) {
@@ -68,13 +86,51 @@ struct ContentView: View {
                         .padding()
                     }
                 }
-                .navigationTitle(selectionMode ? "已选 \(selected.count)" : "Heifify")
-                .onAppear { vm.requestPermissionAndLoad() }
+                .navigationTitle("")
+                .navigationBarTitleDisplayMode(.inline)
+                .onAppear { vm.requestPermissionAndLoad(); scrollProgress = 0 }
                 .onChange(of: scenePhase) { phase in
                     if phase == .active { vm.softReloadIfNeeded() }
                 }
+                .onChange(of: scrollToTopToken) { _ in
+                    // Smoothly scroll to very top
+                    // Use NotificationCenter to bridge to ScrollViewReader if needed
+                }
                 .toolbar {
+                    ToolbarItem(placement: .principal) {
+                        Text(selectionMode ? "已选 \(selected.count)" : "Heifify")
+                            .font(.headline)
+                            .opacity(1 - scrollProgress)
+                            .onTapGesture(count: 2) {
+                                // Broadcast a scroll-to-top request
+                                scrollToTopToken += 1
+                            }
+                    }
+                    ToolbarItemGroup(placement: .topBarLeading) {
+                        Button {
+                            showSettings = true
+                        } label: {
+                            Image(systemName: "gearshape.fill")
+                        }
+                    }
                     ToolbarItemGroup(placement: .topBarTrailing) {
+                        Menu {
+                            ForEach(vm.albumMenu, id: \.id) { item in
+                                Button {
+                                    vm.currentCollection = item.collection
+                                    vm.loadAssets(in: item.collection)
+                                } label: {
+                                    HStack {
+                                        if let img = item.thumbnail {
+                                            Image(uiImage: img).resizable().scaledToFill().frame(width: 22, height: 22).clipped().cornerRadius(4)
+                                        } else {
+                                            Image(systemName: "photo.on.rectangle").foregroundStyle(.secondary)
+                                        }
+                                        Text("\(item.title) (\(item.count))")
+                                    }
+                                }
+                            }
+                        } label: { Image(systemName: "photo.on.rectangle.angled").opacity(1 - scrollProgress) }
                         if selectionMode {
                             Button(selected.count == vm.items.count ? "取消全选" : "全选") {
                                 if selected.count == vm.items.count { selected.removeAll() } else { selected = Set(vm.items.map { $0.id }) }
@@ -84,32 +140,29 @@ struct ContentView: View {
                         }
                     }
                 }
+                .sheet(isPresented: $showSettings) { SettingsView() }
+                // Hide navigation bar once user starts scrolling up; show when at top
+                .toolbar(scrollProgress > 0.12 ? .hidden : .visible, for: .navigationBar)
                 .sheet(isPresented: $showBatchConvertSheet) {
                     NavigationStack {
-                        VStack(alignment: .leading, spacing: 16) {
-                            Text("批量转换为 HEIF").font(.headline)
-                            HStack { Text("压缩比"); Slider(value: $batchQuality, in: 0.3...1.0, step: 0.05); Text(String(format: "%.2f", batchQuality)) }
-                            HStack {
-                                Text("色深")
-                                Picker("色深", selection: $batchDepth) {
-                                    Text("8-bit").tag(ImageBitDepth.eightBit)
-                                    Text("10-bit").tag(ImageBitDepth.tenBit)
-                                }
-                                .pickerStyle(.segmented)
-                            }
-                            Button("开始转换 (\(selected.count))") {
+                        ConversionOptionsView(
+                            quality: $batchQuality,
+                            depth: $batchDepth,
+                            saveMode: $batchSaveMode,
+                            showInfo: false,
+                            originalSizeText: nil,
+                            estimatedSizeText: nil,
+                            convertButtonTitle: "开始转换 (\(selected.count))",
+                            onStart: {
                                 let assets = vm.items.filter { selected.contains($0.id) }.map { $0.asset }
-                                vm.batchConvertToHEIF(assets: assets, quality: batchQuality, depth: batchDepth)
+                                vm.batchConvertToHEIF(assets: assets, quality: batchQuality, depth: batchDepth, saveMode: batchSaveMode)
                                 showBatchConvertSheet = false
                             }
-                            .buttonStyle(.borderedProminent)
-                            Text("转换过程中会保存到相册。")
-                            Spacer()
-                        }
-                        .padding()
+                        )
                         .navigationTitle("批量转换")
                     }
-                    .presentationDetents([.height(220), .large])
+                    .presentationDetents([.medium, .large])
+                    .presentationDragIndicator(.visible)
                 }
             }
         }
@@ -141,6 +194,19 @@ struct ContentView: View {
                 }
                 .transition(.opacity)
                 .zIndex(20)
+            }
+            if let msg = vm.toastMessage {
+                VStack { Spacer();
+                    Text(msg)
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 16).padding(.vertical, 10)
+                        .background(.black.opacity(0.8))
+                        .clipShape(Capsule())
+                        .padding(.bottom, 24)
+                }
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+                .zIndex(30)
+                .onAppear { DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { withAnimation { vm.toastMessage = nil } } }
             }
         }
     }
